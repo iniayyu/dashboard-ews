@@ -78,11 +78,6 @@ interface AdminViewProps {
   }>;
   onToggleRelay: () => Promise<void>;
   onToggleBuzzer: () => Promise<void>;
-  onSimulateSensor: (
-    water: number,
-    flow: number,
-    rain: number,
-  ) => Promise<void>;
   onAddFloodEvent?: (cause: string, notes: string) => Promise<void>;
   onAddAdminUser: (
     name: string,
@@ -152,7 +147,6 @@ export const AdminView: React.FC<AdminViewProps> = ({
   onSendWhatsAppBroadcast,
   onToggleRelay,
   onToggleBuzzer,
-  onSimulateSensor,
   onAddAdminUser,
   onDeleteAdminUser,
   onTestDatabase: _onTestDatabase,
@@ -256,14 +250,11 @@ export const AdminView: React.FC<AdminViewProps> = ({
   >([]);
   const [fetchGroupMsg, setFetchGroupMsg] = useState<string | null>(null);
 
-  const [simWater, setSimWater] = useState(sensorState.water_level_cm);
-  const [simFlow, setSimFlow] = useState(sensorState.flow_rate_lpm);
-  const [simRain, setSimRain] = useState(sensorState.rain_pct);
-
   const [showAddAdminModal, setShowAddAdminModal] = useState(false);
   const [newAdminName, setNewAdminName] = useState("");
   const [newAdminPassword, setNewAdminPassword] = useState("");
   const [savingAdmin, setSavingAdmin] = useState(false);
+  const [unlockAddAdminInputs, setUnlockAddAdminInputs] = useState(false);
 
   useEffect(() => {
     if (!thresholdTouchedRef.current) {
@@ -300,16 +291,6 @@ export const AdminView: React.FC<AdminViewProps> = ({
       setWaNotifySiaga(whatsAppConfig.notify_siaga ?? true);
     }
   }, [whatsAppConfig]);
-
-  useEffect(() => {
-    setSimWater(sensorState.water_level_cm);
-    setSimFlow(sensorState.flow_rate_lpm);
-    setSimRain(sensorState.rain_pct);
-  }, [
-    sensorState.water_level_cm,
-    sensorState.flow_rate_lpm,
-    sensorState.rain_pct,
-  ]);
 
   const menuItems: Array<{
     id: AdminTab;
@@ -559,26 +540,6 @@ export const AdminView: React.FC<AdminViewProps> = ({
       );
     } finally {
       setFetchingGroups(false);
-    }
-  };
-
-  const handleApplySimulator = async () => {
-    try {
-      await onSimulateSensor(simWater, simFlow, simRain);
-    } catch (error: any) {
-      alert(error?.message || "Gagal menerapkan simulasi sensor.");
-    }
-  };
-
-  const applyPreset = async (water: number, flow: number, rain: number) => {
-    setSimWater(water);
-    setSimFlow(flow);
-    setSimRain(rain);
-
-    try {
-      await onSimulateSensor(water, flow, rain);
-    } catch (error: any) {
-      alert(error?.message || "Gagal menjalankan simulasi sensor.");
     }
   };
 
@@ -873,9 +834,9 @@ export const AdminView: React.FC<AdminViewProps> = ({
         </div>
 
         <main className="flex-1 md:ml-60 lg:ml-64 min-w-0 pt-0">
-          <div className="px-4 sm:px-6 lg:px-8 pt-2 sm:pt-3 pb-6 lg:pb-8">
-            <div className="mb-4">
-              <h1 className="text-2xl sm:text-3xl font-black text-slate-900">
+          <div className="px-4 sm:px-6 lg:px-8 pt-0 pb-6 lg:pb-8">
+            <div className="mb-3">
+              <h1 className="text-2xl sm:text-3xl font-black text-slate-900 leading-tight">
                 {activeMenu?.label || "Monitoring"}
               </h1>
 
@@ -914,120 +875,6 @@ export const AdminView: React.FC<AdminViewProps> = ({
                       onToggleBuzzer={onToggleBuzzer}
                       isAdmin={true}
                     />
-                  </div>
-                </div>
-
-                {/* SIMULATOR */}
-                <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-                  <div className="flex items-start gap-3 mb-5 border-b border-slate-100 pb-4">
-                    <div className="p-2.5 rounded-xl bg-blue-50 text-blue-700 border border-blue-200">
-                      <Sliders className="w-5 h-5" />
-                    </div>
-
-                    <div>
-                      <h3 className="font-extrabold text-slate-900">
-                        Simulator Sensor
-                      </h3>
-
-                      <p className="text-xs text-slate-500 mt-1">
-                        Gunakan simulator untuk menguji perubahan status (Aman,
-                        Waspada, Siaga), relay, sirine, dan WhatsApp broadcast
-                        otomatis.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
-                    <div>
-                      <div className="flex justify-between text-xs font-semibold text-slate-700 mb-2">
-                        <span>Ketinggian Air</span>
-                        <strong className="text-blue-700 font-mono">
-                          {simWater} cm
-                        </strong>
-                      </div>
-
-                      <input
-                        type="range"
-                        min="20"
-                        max="240"
-                        value={simWater}
-                        onChange={(e) => setSimWater(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between text-xs font-semibold text-slate-700 mb-2">
-                        <span>Debit Air</span>
-                        <strong className="text-blue-700 font-mono">
-                          {simFlow} L/min
-                        </strong>
-                      </div>
-
-                      <input
-                        type="range"
-                        min="0"
-                        max="75"
-                        value={simFlow}
-                        onChange={(e) => setSimFlow(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between text-xs font-semibold text-slate-700 mb-2">
-                        <span>Curah Hujan</span>
-                        <strong className="text-blue-700 font-mono">
-                          {simRain}%
-                        </strong>
-                      </div>
-
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={simRain}
-                        onChange={(e) => setSimRain(Number(e.target.value))}
-                        className="w-full accent-blue-600"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => applyPreset(2.0, 10, 5)}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold cursor-pointer hover:bg-emerald-100"
-                      >
-                        Aman (2 cm)
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => applyPreset(5.0, 25, 45)}
-                        className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold cursor-pointer hover:bg-amber-100"
-                      >
-                        Waspada (5 cm)
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => applyPreset(8.0, 48, 75)}
-                        className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-900 border border-rose-200 text-xs font-bold cursor-pointer hover:bg-rose-100"
-                      >
-                        Siaga (8 cm)
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleApplySimulator}
-                      className="px-5 py-2.5 rounded-xl bg-[#0066cc] hover:bg-blue-800 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-xs"
-                    >
-                      <RefreshCw className="w-4 h-4" />
-                      Terapkan Nilai Sensor
-                    </button>
                   </div>
                 </div>
               </div>
@@ -1956,7 +1803,12 @@ export const AdminView: React.FC<AdminViewProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => setShowAddAdminModal(true)}
+                    onClick={() => {
+                      setNewAdminName("");
+                      setNewAdminPassword("");
+                      setUnlockAddAdminInputs(false);
+                      setShowAddAdminModal(true);
+                    }}
                     className="px-4 py-2 rounded-xl bg-[#0066cc] hover:bg-blue-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
                   >
                     <Plus className="w-4 h-4" />
@@ -2034,7 +1886,11 @@ export const AdminView: React.FC<AdminViewProps> = ({
               Buat akun akses admin baru untuk posko EWS.
             </p>
 
-            <div className="space-y-4">
+            <form
+              autoComplete="off"
+              onSubmit={(e) => e.preventDefault()}
+              className="space-y-4"
+            >
               <div>
                 <label className="block font-bold text-slate-700 text-xs mb-1.5">
                   Nama Lengkap
@@ -2042,6 +1898,11 @@ export const AdminView: React.FC<AdminViewProps> = ({
 
                 <input
                   type="text"
+                  name="ews-new-petugas-fullname"
+                  autoComplete="off"
+                  readOnly={!unlockAddAdminInputs}
+                  onFocus={() => setUnlockAddAdminInputs(true)}
+                  onMouseDown={() => setUnlockAddAdminInputs(true)}
                   value={newAdminName}
                   onChange={(e) => setNewAdminName(e.target.value)}
                   placeholder="Contoh: Budi Santoso"
@@ -2056,6 +1917,11 @@ export const AdminView: React.FC<AdminViewProps> = ({
 
                 <input
                   type="password"
+                  name="ews-new-petugas-passcode"
+                  autoComplete="new-password"
+                  readOnly={!unlockAddAdminInputs}
+                  onFocus={() => setUnlockAddAdminInputs(true)}
+                  onMouseDown={() => setUnlockAddAdminInputs(true)}
                   value={newAdminPassword}
                   onChange={(e) => setNewAdminPassword(e.target.value)}
                   placeholder="Minimal 4 karakter"
@@ -2070,12 +1936,17 @@ export const AdminView: React.FC<AdminViewProps> = ({
                 </strong>{" "}
                 (digunakan untuk login).
               </div>
-            </div>
+            </form>
 
             <div className="mt-6 flex justify-end gap-2.5">
               <button
                 type="button"
-                onClick={() => setShowAddAdminModal(false)}
+                onClick={() => {
+                  setNewAdminName("");
+                  setNewAdminPassword("");
+                  setUnlockAddAdminInputs(false);
+                  setShowAddAdminModal(false);
+                }}
                 disabled={savingAdmin}
                 className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
               >

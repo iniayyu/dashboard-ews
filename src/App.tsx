@@ -378,8 +378,13 @@ export default function App() {
     fetchStatus();
     fetchAuxiliaryData();
 
+    let tick = 0;
     const interval = setInterval(() => {
+      tick += 1;
       fetchStatus();
+      if (tick % 2 === 0) {
+        fetchAuxiliaryData();
+      }
     }, 3000);
 
     return () => {
@@ -543,29 +548,6 @@ export default function App() {
     }
   };
 
-  const handleSimulateSensor = async (
-    water: number,
-    flow: number,
-    rain: number,
-  ) => {
-    try {
-      await fetch("/api/control", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          water_level_cm: water,
-          flow_rate_lpm: flow,
-          rain_pct: rain,
-        }),
-      });
-      await fetchStatus();
-      await fetchAuxiliaryData();
-      playBuzzerBeep(800, 150);
-    } catch (err) {
-      console.error("Gagal simulasi sensor:", err);
-    }
-  };
-
   const handleAddFloodEvent = async (cause: string, notes: string) => {
     try {
       const res = await fetch("/api/flood-events", {
@@ -713,7 +695,11 @@ export default function App() {
         onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main
+        className={`flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 ${
+          currentView === "admin" ? "pt-1 pb-6" : "py-6"
+        }`}
+      >
         {currentView === "warga" ? (
           <WargaView
             sensorState={sensorState}
@@ -747,7 +733,6 @@ export default function App() {
             onSendWhatsAppBroadcast={handleSendWhatsAppBroadcast}
             onToggleRelay={handleToggleRelay}
             onToggleBuzzer={handleToggleBuzzer}
-            onSimulateSensor={handleSimulateSensor}
             onAddFloodEvent={handleAddFloodEvent}
             onAddAdminUser={handleAddAdminUser}
             onUpdateAdminUser={handleUpdateAdminUser}

@@ -1,4 +1,6 @@
-export function getEsp32ArduinoCode(serverUrl: string = 'http://192.168.1.100:3000'): string {
+export function getEsp32ArduinoCode(
+  serverUrl: string = "http://192.168.1.100:3000",
+): string {
   return `/*
  * =========================================================================
  * SISTEM PERINGATAN DINI BANJIR (EWS) BERBASIS ESP32
@@ -22,7 +24,7 @@ const char* ssid = "NAMA_WIFI_ANDA";
 const char* password = "PASSWORD_WIFI";
 
 // 2. URL Server EWS (Ganti dengan IP / Domain server web ini)
-const char* serverEndpoint = "${serverUrl}/api/sensor-data";
+const char* serverEndpoint = "${serverUrl}/api/sensor/telemetry";
 
 // 3. Konfigurasi Pinout ESP32
 #define PIN_TRIG 5          // HC-SR04 Trig

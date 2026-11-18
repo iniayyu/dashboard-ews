@@ -411,13 +411,24 @@ export const SensorCard: React.FC<SensorCardProps> = ({
               />
             </div>
             <div className="flex items-center justify-between gap-2">
-              <span
-                className={`text-sm font-black tracking-wide ${
-                  buzzerState ? "text-rose-600 animate-pulse" : "text-slate-500"
-                }`}
-              >
-                {buzzerState ? "ON" : "OFF"}
-              </span>
+              <div className="flex items-baseline gap-1.5">
+                <span
+                  className={`text-sm font-black tracking-wide ${
+                    buzzerState
+                      ? "text-rose-600 animate-pulse"
+                      : "text-slate-500"
+                  }`}
+                >
+                  {buzzerState ? "ON" : "OFF"}
+                </span>
+                {buzzerState &&
+                  typeof sirenElapsedSeconds === "number" &&
+                  sirenElapsedSeconds > 0 && (
+                    <span className="text-[11px] font-semibold text-rose-500">
+                      ({Math.min(60, sirenElapsedSeconds)}/60 dtk)
+                    </span>
+                  )}
+              </div>
               {onToggleBuzzer && (
                 <button
                   type="button"

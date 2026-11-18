@@ -11,13 +11,20 @@ import {
   ubahBatas,
   catatAlarm,
   ambilRiwayatAlarm,
+  updateRiwayatAlarm,
+  hapusRiwayatAlarm,
+  fixAllZeroAlarmDurations,
   isMysqlReady,
   ambilSemuaPetugas,
   tambahPetugas,
   updatePetugas,
   hapusPetugas,
   updateLoginTerakhir,
+  getMysqlError,
+  ambilRiwayatKejadian,
+  ambilRiwayatGrafik,
 } from "./src/db/mysql.js";
+import { AdminUser } from "./src/types.js";
 
 dotenv.config();
 
@@ -67,6 +74,7 @@ let sensorState = {
   buzzer_state: false,
   led_indicator: "green" as "green" | "yellow" | "red" | "orange",
   timestamp: new Date().toISOString(),
+  siren_elapsed_seconds: 0,
 };
 
 // WhatsApp (Fonnte API Gateway) config
@@ -160,28 +168,68 @@ let floodEvents: Array<{
   max_warning_level: string;
   cause?: string;
   action_notes?: string;
-}> = [
-  {
-    id: "FL-2026-03-01",
-    start_time: "01 Maret 2026 03:15 WIB",
-    peak_water_level_cm: 188.5,
-    peak_flow_rate_lpm: 56.4,
-    max_warning_level: "SIAGA",
-    cause: "Hujan intensitas lebat kiriman hulu sungai",
+  _updatedAt?: number;
+}> = [];
+
+let lastLiveEventBrokenByAman = true;
+
+function recordLiveFloodEvent(level: "AMAN" | "WASPADA" | "SIAGA" | "BAHAYA") {
+  if (level !== "WASPADA" && level !== "SIAGA" && level !== "BAHAYA") {
+    lastLiveEventBrokenByAman = true;
+    return;
+  }
+  const now = Date.now();
+  const normalizedLevel = level === "BAHAYA" ? "SIAGA" : level;
+  const latest = floodEvents[0];
+
+  if (
+    !lastLiveEventBrokenByAman &&
+    latest &&
+    latest.max_warning_level === normalizedLevel &&
+    latest._updatedAt &&
+    now - latest._updatedAt <= 3 * 60 * 1000
+  ) {
+    latest.peak_water_level_cm = +Math.max(
+      latest.peak_water_level_cm,
+      sensorState.water_level_cm,
+    ).toFixed(1);
+    latest.peak_flow_rate_lpm = +Math.max(
+      latest.peak_flow_rate_lpm,
+      sensorState.flow_rate_lpm,
+    ).toFixed(1);
+    latest._updatedAt = now;
+    return;
+  }
+
+  lastLiveEventBrokenByAman = false;
+
+  const dt = new Date();
+  const dateLabel = dt.toLocaleDateString("id-ID", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+  const timeLabel = dt.toLocaleTimeString("id-ID", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+  floodEvents.unshift({
+    id: `FL-${dt.toISOString().slice(0, 10).replace(/-/g, "")}-${dt.getTime().toString().slice(-4)}`,
+    start_time: `${dateLabel} ${timeLabel} WIB`,
+    peak_water_level_cm: +sensorState.water_level_cm.toFixed(1),
+    peak_flow_rate_lpm: +sensorState.flow_rate_lpm.toFixed(1),
+    max_warning_level: normalizedLevel,
+    cause: `Sensor ketinggian air mencapai ${sensorState.water_level_cm.toFixed(1)} cm`,
     action_notes:
-      "Pompa pembuangan otomatis aktif, evakuasi barang warga RT 02 & RT 03 selesai.",
-  },
-  {
-    id: "FL-2026-02-14",
-    start_time: "14 Februari 2026 21:40 WIB",
-    peak_water_level_cm: 152.0,
-    peak_flow_rate_lpm: 41.2,
-    max_warning_level: "WASPADA",
-    cause: "Hujan lokal deras berdurasi > 3 jam",
-    action_notes:
-      "Peringatan diteruskan ke WhatsApp Grup Warga, pintu air dibuka.",
-  },
-];
+      normalizedLevel === "SIAGA"
+        ? "Sirine & pompa siaga aktif, notifikasi darurat dikirim."
+        : "Peringatan waspada dikirim ke grup warga.",
+    _updatedAt: now,
+  });
+  if (floodEvents.length > 30) floodEvents.pop();
+}
 
 let alarmLogs: Array<{
   id: string;
@@ -206,7 +254,7 @@ let alarmLogs: Array<{
 // =====================================================================
 const ADMIN_USERS_FILE = path.resolve(".data_admin_users.json");
 
-const defaultAdminUsers = [
+const defaultAdminUsers: AdminUser[] = [
   {
     id: "ADM-01",
     name: "Bambang Sutrisno",
@@ -225,17 +273,19 @@ const defaultAdminUsers = [
   },
 ];
 
-function loadAdminUsers() {
+function loadAdminUsers(): AdminUser[] {
   try {
     if (fs.existsSync(ADMIN_USERS_FILE)) {
       const raw = fs.readFileSync(ADMIN_USERS_FILE, "utf-8");
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        console.log(`[AdminUsers] Loaded ${parsed.length} user(s) dari ${ADMIN_USERS_FILE}`);
-        return parsed;
+        console.log(
+          `[AdminUsers] Loaded ${parsed.length} user(s) dari ${ADMIN_USERS_FILE}`,
+        );
+        return parsed as AdminUser[];
       }
     }
-  } catch (e) {
+  } catch (e: any) {
     console.warn("[AdminUsers] Gagal baca file, pakai default:", e?.message);
   }
   return JSON.parse(JSON.stringify(defaultAdminUsers)); // deep copy
@@ -243,20 +293,107 @@ function loadAdminUsers() {
 
 function saveAdminUsers() {
   try {
-    fs.writeFileSync(ADMIN_USERS_FILE, JSON.stringify(adminUsers, null, 2), "utf-8");
+    fs.writeFileSync(
+      ADMIN_USERS_FILE,
+      JSON.stringify(adminUsers, null, 2),
+      "utf-8",
+    );
     console.log("[AdminUsers] Data tersimpan ke", ADMIN_USERS_FILE);
-  } catch (e) {
+  } catch (e: any) {
     console.error("[AdminUsers] Gagal simpan ke file:", e?.message);
   }
 }
 
-let adminUsers = loadAdminUsers();
+let adminUsers: AdminUser[] = loadAdminUsers();
 
 // Tracks previous warning level to trigger notifications on state transitions
 let lastNotificationLevel: "AMAN" | "WASPADA" | "SIAGA" | "BAHAYA" = "AMAN";
 
 // Flag: true jika server baru saja restart (belum pernah terima data ESP32)
 let isFirstTelemetry = true;
+
+// Override manual admin agar tidak langsung tertimpa lagi oleh telemetri ESP32 tiap 3 detik
+let manualRelayOverride: boolean | null = null;
+let manualBuzzerOverride: boolean | null = null;
+
+// Pelacakan alarm aktif & batas maksimal buzzer (1 menit = 60 detik)
+const MAX_BUZZER_DURATION_MS = 60 * 1000;
+let buzzerActiveSinceMs: number | null = null;
+let activeAlarmId: string | null = null;
+let activeAlarmStartMs: number | null = null;
+
+async function enforceBuzzerMaxDuration() {
+  if (
+    sensorState.buzzer_state &&
+    buzzerActiveSinceMs !== null &&
+    Date.now() - buzzerActiveSinceMs >= MAX_BUZZER_DURATION_MS
+  ) {
+    console.log(
+      "[EWS] Buzzer mencapai durasi maksimal 1 menit — dimatikan otomatis.",
+    );
+    sensorState.buzzer_state = false;
+    buzzerActiveSinceMs = null;
+    manualBuzzerOverride = false;
+    await finalizeActiveAlarm("Otomatis (Maks 1 Menit)");
+  }
+}
+
+setInterval(() => {
+  enforceBuzzerMaxDuration().catch(() => {});
+}, 1000);
+
+async function finalizeActiveAlarm(stoppedBy: string) {
+  if (!activeAlarmId || !activeAlarmStartMs) return;
+  const alarmId = activeAlarmId;
+  const elapsedSeconds = Math.max(
+    1,
+    Math.round((Date.now() - activeAlarmStartMs) / 1000),
+  );
+  activeAlarmId = null;
+  activeAlarmStartMs = null;
+  sensorState.siren_elapsed_seconds = 0;
+
+  const memLog = alarmLogs.find((l) => l.id === alarmId);
+  if (memLog) {
+    memLog.duration_seconds = elapsedSeconds;
+    memLog.stopped_by = stoppedBy;
+  }
+
+  await updateRiwayatAlarm(alarmId, {
+    durasi_detik: elapsedSeconds,
+    dihentikan_oleh: stoppedBy,
+  }).catch((e: any) =>
+    console.error("[MySQL] Gagal update durasi RiwayatAlarm:", e?.message),
+  );
+}
+
+async function startActiveAlarm(
+  level: "AMAN" | "WASPADA" | "SIAGA" | "BAHAYA",
+  reason: string,
+) {
+  const dbLevel = (level === "BAHAYA" ? "SIAGA" : level) as
+    | "AMAN"
+    | "WASPADA"
+    | "SIAGA";
+  const startNow = Date.now();
+  try {
+    const newId = await catatAlarm(dbLevel, reason, "Sedang Aktif", 0);
+    activeAlarmId = newId;
+    activeAlarmStartMs = startNow;
+    sensorState.siren_elapsed_seconds = 1;
+    alarmLogs.unshift({
+      id: newId,
+      timestamp: new Date().toLocaleString("id-ID"),
+      level: dbLevel,
+      trigger_reason: reason,
+      duration_seconds: 0,
+      stopped_by: "Sedang Aktif",
+    });
+    if (alarmLogs.length > 50) alarmLogs.pop();
+  } catch (e: any) {
+    console.error("[MySQL] Gagal catat alarm:", e?.message);
+  }
+}
 
 // =====================================================================
 // LEVEL CALCULATION HELPER
@@ -364,6 +501,9 @@ async function checkAndSendAlert(
     return;
   }
 
+  // Update synchronously sebelum await agar request berikutnya tidak mengirim notifikasi ganda
+  lastNotificationLevel = newLevel;
+
   const timeStr = new Date().toLocaleTimeString("id-ID", {
     hour: "2-digit",
     minute: "2-digit",
@@ -374,17 +514,23 @@ async function checkAndSendAlert(
     year: "numeric",
   });
 
-  console.log(`[EWS Status Transition] ${effectivePrev} ➔ ${newLevel}${isFirstTelemetry === false && prevLevel !== effectivePrev ? " (server baru restart, transisi dipaksakan)" : ""}`);
+  console.log(
+    `[EWS Status Transition] ${effectivePrev} ➔ ${newLevel}${isFirstTelemetry === false && prevLevel !== effectivePrev ? " (server baru restart, transisi dipaksakan)" : ""}`,
+  );
 
   // -------------------------------------------------------------
   // 1. TRANSITION TO STATUS: WASPADA
   // -------------------------------------------------------------
   if (newLevel === "WASPADA") {
-    // Catat ke RiwayatAlarm MySQL
-    catatAlarm(
+    await finalizeActiveAlarm(
+      effectivePrev === "SIAGA" || effectivePrev === "BAHAYA"
+        ? "Otomatis (Surut ke WASPADA)"
+        : "Otomatis",
+    );
+    await startActiveAlarm(
       "WASPADA",
       `Ketinggian air ${sensorState.water_level_cm.toFixed(1)} cm melewati batas aman (${thresholds.level_aman_max} cm)`,
-    ).catch((e: any) => console.error("[MySQL] Gagal catat alarm WASPADA:", e?.message));
+    );
 
     if (whatsAppConfig.notify_waspada) {
       const waMsg =
@@ -411,13 +557,13 @@ async function checkAndSendAlert(
   // 2. TRANSITION TO STATUS: SIAGA
   // -------------------------------------------------------------
   else if (newLevel === "SIAGA" || newLevel === "BAHAYA") {
-    // Catat ke RiwayatAlarm MySQL
-    catatAlarm(
+    await finalizeActiveAlarm(
+      effectivePrev === "WASPADA" ? "Otomatis (Naik SIAGA)" : "Otomatis",
+    );
+    await startActiveAlarm(
       "SIAGA",
       `Ketinggian air ${sensorState.water_level_cm.toFixed(1)} cm melewati batas waspada (${thresholds.level_waspada_max} cm)`,
-      "Otomatis",
-      0,
-    ).catch((e: any) => console.error("[MySQL] Gagal catat alarm SIAGA:", e?.message));
+    );
 
     if (whatsAppConfig.notify_siaga) {
       const waMsg =
@@ -457,6 +603,8 @@ async function checkAndSendAlert(
     newLevel === "AMAN" &&
     (effectivePrev === "WASPADA" || effectivePrev === "SIAGA")
   ) {
+    await finalizeActiveAlarm("Otomatis (Surut ke AMAN)");
+
     const waMsg =
       `✅ *[INFO EWS BANJIR - AIR KEMBALI NORMAL]* ✅\n\n` +
       `Pantauan sensor EWS menunjukkan ketinggian air telah surut kembali ke batas *AMAN*.\n\n` +
@@ -467,8 +615,6 @@ async function checkAndSendAlert(
 
     await sendFonnteWhatsApp(whatsAppConfig.target_number, waMsg);
   }
-
-  lastNotificationLevel = newLevel;
 }
 
 // =====================================================================
@@ -476,9 +622,17 @@ async function checkAndSendAlert(
 // =====================================================================
 
 // 1. GET /api/status
-app.get("/api/status", (_req, res) => {
+app.get("/api/status", async (_req, res) => {
+  await enforceBuzzerMaxDuration();
   // Automatically calculate real-time online status
   esp32Status.online = isEsp32Alive();
+  sensorState.siren_elapsed_seconds =
+    sensorState.buzzer_state && buzzerActiveSinceMs !== null
+      ? Math.min(
+          60,
+          Math.max(1, Math.floor((Date.now() - buzzerActiveSinceMs) / 1000)),
+        )
+      : 0;
 
   res.json({
     sensorState,
@@ -487,10 +641,10 @@ app.get("/api/status", (_req, res) => {
     whatsAppConfig,
     esp32Status,
     databaseStatus: {
-      connected: true,
-      driver: "memory",
-      host: "localhost",
-      database: "ews_banjir",
+      connected: isMysqlReady(),
+      driver: isMysqlReady() ? "mysql" : "memory",
+      host: process.env.DB_HOST || "127.0.0.1",
+      database: process.env.DB_NAME || "ews_banjir",
       tableCount: 6,
       lastChecked: new Date().toISOString(),
     },
@@ -499,7 +653,13 @@ app.get("/api/status", (_req, res) => {
 
 // 1.1 POST /api/sensor/telemetry (Endpoint dipanggil oleh mikrokontroler ESP32 setiap 3-5 detik)
 app.post(
-  ["/api/sensor/telemetry", "/api/sensor/data", "/api/telemetry"],
+  [
+    "/api/sensor/telemetry",
+    "/api/sensor/data",
+    "/api/sensor-data",
+    "/api/telemetry",
+    "/api/data",
+  ],
   async (req, res) => {
     const b = req.body || {};
     lastEspHeartbeatTime = Date.now();
@@ -514,17 +674,17 @@ app.post(
       esp32Status.uptime_seconds = b.uptime_seconds;
 
     // Baca nilai sensor dari ESP32 jika dikirim
-    const water     = b.water_level_cm ?? b.waterLevel    ?? b.tinggi_air;
-    const flow      = b.flow_rate_lpm  ?? b.flow          ?? b.debit_air;
-    const rain      = b.rain_pct       ?? b.rainPercent   ?? b.persen_hujan;
-    const rainAdc   = b.rain_analog    ?? b.rainAnalog    ?? null;
+    const water = b.water_level_cm ?? b.waterLevel ?? b.tinggi_air;
+    const flow = b.flow_rate_lpm ?? b.flow ?? b.debit_air;
+    const rain = b.rain_pct ?? b.rainPercent ?? b.persen_hujan;
+    const rainAdc = b.rain_analog ?? b.rainAnalog ?? null;
 
     // Gunakan lastNotificationLevel sebagai acuan level sebelumnya
     // agar notifikasi dikirim berdasarkan level yang SUDAH dinotifikasi,
     // bukan sekadar nilai sensorState saat ini (yang bisa berubah-ubah setiap 3 detik)
     const prevLevel = lastNotificationLevel;
 
-    if (typeof water === "number") {
+    if (water !== undefined && water !== null && !isNaN(Number(water))) {
       sensorState.water_level_cm = Number(water);
       sensorState.distance_cm = Math.max(
         0,
@@ -532,47 +692,83 @@ app.post(
       );
     }
 
-    if (typeof flow === "number") {
+    if (flow !== undefined && flow !== null && !isNaN(Number(flow))) {
       sensorState.flow_rate_lpm = Number(flow);
       sensorState.water_speed_mps = +(sensorState.flow_rate_lpm / 28).toFixed(
         2,
       );
     }
 
-    if (typeof rain === "number") {
+    if (rain !== undefined && rain !== null && !isNaN(Number(rain))) {
       sensorState.rain_pct = Number(rain);
       // Pakai rain_analog dari ESP32 jika tersedia, kalau tidak konversi dari persen
-      sensorState.rain_analog = (rainAdc !== null && typeof rainAdc === "number")
-        ? Number(rainAdc)
-        : Math.max(0, Math.round(4095 - (sensorState.rain_pct / 100) * 4095));
+      sensorState.rain_analog =
+        rainAdc !== null && !isNaN(Number(rainAdc))
+          ? Number(rainAdc)
+          : Math.max(0, Math.round(4095 - (sensorState.rain_pct / 100) * 4095));
       if (sensorState.rain_pct < 20) sensorState.rain_status = "Cerah Berawan";
-      else if (sensorState.rain_pct < 60) sensorState.rain_status = "Hujan Sedang";
+      else if (sensorState.rain_pct < 60)
+        sensorState.rain_status = "Hujan Sedang";
       else sensorState.rain_status = "Hujan Lebat";
-    } else if (rainAdc !== null && typeof rainAdc === "number") {
+    } else if (rainAdc !== null && !isNaN(Number(rainAdc))) {
       // Kalau hanya rain_analog yang dikirim tanpa rain_pct
       sensorState.rain_analog = Number(rainAdc);
-      sensorState.rain_pct = Math.max(0, ((4095 - sensorState.rain_analog) / 4095) * 100);
+      sensorState.rain_pct = Math.max(
+        0,
+        ((4095 - sensorState.rain_analog) / 4095) * 100,
+      );
       if (sensorState.rain_pct < 20) sensorState.rain_status = "Cerah Berawan";
-      else if (sensorState.rain_pct < 60) sensorState.rain_status = "Hujan Sedang";
+      else if (sensorState.rain_pct < 60)
+        sensorState.rain_status = "Hujan Sedang";
       else sensorState.rain_status = "Hujan Lebat";
     }
 
+    const prevWaterLevel = sensorState.warning_level;
     const newLevel = computeWarningLevel(sensorState.water_level_cm);
     sensorState.warning_level = newLevel;
 
-    // Set aktuator otomatis
+    // Reset override manual hanya jika level peringatan berubah ke fase baru
+    if (prevWaterLevel !== newLevel) {
+      manualRelayOverride = null;
+      manualBuzzerOverride = null;
+    }
+
+    const autoRelay =
+      newLevel === "WASPADA" || newLevel === "SIAGA" || newLevel === "BAHAYA";
+    const autoBuzzer =
+      newLevel === "WASPADA" || newLevel === "SIAGA" || newLevel === "BAHAYA";
+
     if (newLevel === "AMAN") {
       sensorState.led_indicator = "green";
-      if (thresholds.auto_relay_enabled) sensorState.relay_state = false;
-      if (thresholds.auto_buzzer_enabled) sensorState.buzzer_state = false;
     } else if (newLevel === "WASPADA") {
       sensorState.led_indicator = "yellow";
-      if (thresholds.auto_relay_enabled) sensorState.relay_state = false;
-      if (thresholds.auto_buzzer_enabled) sensorState.buzzer_state = false;
     } else {
       sensorState.led_indicator = "red";
-      if (thresholds.auto_relay_enabled) sensorState.relay_state = true;
-      if (thresholds.auto_buzzer_enabled) sensorState.buzzer_state = true;
+    }
+
+    const prevBuzzerState = sensorState.buzzer_state;
+
+    // Set aktuator otomatis sambil menghormati override manual dari Admin
+    if (thresholds.auto_relay_enabled) {
+      const espReportedRelay =
+        typeof b.relay_state === "boolean" ? b.relay_state : false;
+      sensorState.relay_state =
+        manualRelayOverride !== null
+          ? manualRelayOverride
+          : autoRelay || espReportedRelay;
+    }
+    if (thresholds.auto_buzzer_enabled) {
+      sensorState.buzzer_state =
+        manualBuzzerOverride !== null ? manualBuzzerOverride : autoBuzzer;
+    }
+
+    if (sensorState.buzzer_state) {
+      if (!prevBuzzerState || prevWaterLevel !== newLevel) {
+        buzzerActiveSinceMs = Date.now();
+      }
+      await enforceBuzzerMaxDuration();
+    } else {
+      buzzerActiveSinceMs = null;
     }
 
     sensorState.timestamp = new Date().toISOString();
@@ -591,35 +787,54 @@ app.post(
     });
     if (historyData.length > 50) historyData.shift();
 
-    // ✅ Simpan ke MySQL (non-blocking, tidak menunda response ke ESP32)
-    const dbLevel = (newLevel === "BAHAYA" ? "SIAGA" : newLevel) as "AMAN" | "WASPADA" | "SIAGA";
-    simpanDataTinggi(
-      sensorState.water_level_cm,
-      sensorState.distance_cm,
-      dbLevel,
-      sensorState.relay_state,
-      sensorState.buzzer_state,
-    ).catch((e: any) => console.error("[MySQL] Gagal simpan SensorKetinggian:", e?.message));
-    simpanDataDebit(sensorState.flow_rate_lpm, sensorState.water_speed_mps)
-      .catch((e: any) => console.error("[MySQL] Gagal simpan SensorDebit:", e?.message));
-    simpanDataHujan(sensorState.rain_analog, sensorState.rain_pct, sensorState.rain_status)
-      .catch((e: any) => console.error("[MySQL] Gagal simpan SensorHujan:", e?.message));
+    // ✅ Simpan ke MySQL dan ambil ID baris yang tersimpan untuk konfirmasi ke ESP32
+    const dbLevel = (newLevel === "BAHAYA" ? "SIAGA" : newLevel) as
+      | "AMAN"
+      | "WASPADA"
+      | "SIAGA";
+    const [idKetinggian, idDebit, idHujan] = await Promise.all([
+      simpanDataTinggi(
+        sensorState.water_level_cm,
+        sensorState.distance_cm,
+        dbLevel,
+        sensorState.relay_state,
+        sensorState.buzzer_state,
+      ).catch((e: any) => {
+        console.error("[MySQL] Gagal simpan SensorKetinggian:", e?.message);
+        return 0;
+      }),
+      simpanDataDebit(
+        sensorState.flow_rate_lpm,
+        sensorState.water_speed_mps,
+      ).catch((e: any) => {
+        console.error("[MySQL] Gagal simpan SensorDebit:", e?.message);
+        return 0;
+      }),
+      simpanDataHujan(
+        sensorState.rain_analog,
+        sensorState.rain_pct,
+        sensorState.rain_status,
+      ).catch((e: any) => {
+        console.error("[MySQL] Gagal simpan SensorHujan:", e?.message);
+        return 0;
+      }),
+    ]);
+
+    // Catat ke Riwayat Kejadian real-time jika WASPADA / SIAGA
+    recordLiveFloodEvent(newLevel);
 
     // Pemicu WhatsApp
     checkAndSendAlert(prevLevel, newLevel).catch(() => {});
 
     res.json({
-      status: "success",
-      message: "Data ESP32 berhasil diterima",
-      actuators: {
-        relay: sensorState.relay_state,
-        buzzer: sensorState.buzzer_state,
-        led: sensorState.led_indicator,
-      },
-      thresholds: {
-        aman_max: thresholds.level_aman_max,
-        waspada_max: thresholds.level_waspada_max,
-        siaga_max: thresholds.level_siaga_max,
+      success: true,
+      relay: sensorState.relay_state ? 1 : 0,
+      buzzer: sensorState.buzzer_state ? 1 : 0,
+      warning_level: sensorState.warning_level,
+      saved: {
+        sensor_ketinggian_id: idKetinggian,
+        sensor_debit_id: idDebit,
+        sensor_hujan_id: idHujan,
       },
     });
   },
@@ -702,78 +917,148 @@ app.post("/api/control", async (req, res) => {
     else sensorState.rain_status = "Hujan Lebat";
   }
 
+  const hasSensorPayload =
+    typeof water_level_cm === "number" ||
+    typeof flow_rate_lpm === "number" ||
+    typeof rain_pct === "number";
+
+  const prevWaterLevel = sensorState.warning_level;
   // Recalculate warning level based on new water level
   const newLevel = computeWarningLevel(sensorState.water_level_cm);
   sensorState.warning_level = newLevel;
 
+  if (prevWaterLevel !== newLevel) {
+    manualRelayOverride = null;
+    manualBuzzerOverride = null;
+  }
+
   // Set LED indicator & actuators automatically if enabled
   if (newLevel === "AMAN") {
     sensorState.led_indicator = "green";
-    if (thresholds.auto_relay_enabled && typeof relay !== "boolean")
+    if (
+      thresholds.auto_relay_enabled &&
+      typeof relay !== "boolean" &&
+      manualRelayOverride === null
+    )
       sensorState.relay_state = false;
-    if (thresholds.auto_buzzer_enabled && typeof buzzer !== "boolean")
+    if (
+      thresholds.auto_buzzer_enabled &&
+      typeof buzzer !== "boolean" &&
+      manualBuzzerOverride === null
+    )
       sensorState.buzzer_state = false;
   } else if (newLevel === "WASPADA") {
     sensorState.led_indicator = "yellow";
-    if (thresholds.auto_relay_enabled && typeof relay !== "boolean")
-      sensorState.relay_state = false;
-    if (thresholds.auto_buzzer_enabled && typeof buzzer !== "boolean")
-      sensorState.buzzer_state = false;
+    if (
+      thresholds.auto_relay_enabled &&
+      typeof relay !== "boolean" &&
+      manualRelayOverride === null
+    )
+      sensorState.relay_state = true;
+    if (
+      thresholds.auto_buzzer_enabled &&
+      typeof buzzer !== "boolean" &&
+      manualBuzzerOverride === null
+    )
+      sensorState.buzzer_state = true;
   } else {
     // SIAGA / BAHAYA
     sensorState.led_indicator = "red";
-    if (thresholds.auto_relay_enabled && typeof relay !== "boolean")
+    if (
+      thresholds.auto_relay_enabled &&
+      typeof relay !== "boolean" &&
+      manualRelayOverride === null
+    )
       sensorState.relay_state = true;
-    if (thresholds.auto_buzzer_enabled && typeof buzzer !== "boolean")
+    if (
+      thresholds.auto_buzzer_enabled &&
+      typeof buzzer !== "boolean" &&
+      manualBuzzerOverride === null
+    )
       sensorState.buzzer_state = true;
   }
 
-  // Manual overrides
-  if (typeof relay === "boolean") sensorState.relay_state = relay;
+  const prevBuzzerBeforeControl = sensorState.buzzer_state;
+
+  // Manual overrides dari admin
+  if (typeof relay === "boolean") {
+    manualRelayOverride = relay;
+    sensorState.relay_state = relay;
+  }
   if (typeof buzzer === "boolean") {
+    manualBuzzerOverride = buzzer;
     sensorState.buzzer_state = buzzer;
     if (buzzer) {
-      alarmLogs.unshift({
-        id: `ALM-${Date.now().toString().slice(-4)}`,
-        timestamp: new Date().toLocaleString("id-ID"),
-        level: sensorState.warning_level,
-        trigger_reason: `Aktivasi manual oleh ${admin_name || "Admin"}`,
-        duration_seconds: 60,
-        stopped_by: "Manual Admin",
-      });
+      buzzerActiveSinceMs = Date.now();
+      await finalizeActiveAlarm(`Manual (${admin_name || "Admin"})`);
+      await startActiveAlarm(
+        sensorState.warning_level,
+        `Aktivasi manual oleh ${admin_name || "Admin"}`,
+      );
+    } else {
+      buzzerActiveSinceMs = null;
+      await finalizeActiveAlarm(`Manual (${admin_name || "Admin"})`);
     }
+  } else if (sensorState.buzzer_state) {
+    if (!prevBuzzerBeforeControl || prevWaterLevel !== newLevel) {
+      buzzerActiveSinceMs = Date.now();
+    }
+    await enforceBuzzerMaxDuration();
+  } else {
+    buzzerActiveSinceMs = null;
   }
 
   sensorState.timestamp = new Date().toISOString();
 
-  // Append history point
-  const timeNow = new Date().toLocaleTimeString("id-ID", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  historyData.push({
-    time: timeNow,
-    water_level: sensorState.water_level_cm,
-    flow_rate: sensorState.flow_rate_lpm,
-    rain_pct: sensorState.rain_pct,
-    level: sensorState.warning_level,
-  });
-  if (historyData.length > 50) historyData.shift();
+  if (hasSensorPayload) {
+    // Append history point
+    const timeNow = new Date().toLocaleTimeString("id-ID", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    historyData.push({
+      time: timeNow,
+      water_level: sensorState.water_level_cm,
+      flow_rate: sensorState.flow_rate_lpm,
+      rain_pct: sensorState.rain_pct,
+      level: sensorState.warning_level,
+    });
+    if (historyData.length > 50) historyData.shift();
 
-  // ✅ Simpan ke MySQL (dari simulator / manual control)
-  const dbLevelCtrl = (newLevel === "BAHAYA" ? "SIAGA" : newLevel) as "AMAN" | "WASPADA" | "SIAGA";
-  console.log(`[/api/control] Menyimpan ke MySQL: tinggi=${sensorState.water_level_cm}, debit=${sensorState.flow_rate_lpm}, hujan=${sensorState.rain_pct}%, cuaca=${sensorState.rain_status}`);
-  simpanDataTinggi(
-    sensorState.water_level_cm,
-    sensorState.distance_cm,
-    dbLevelCtrl,
-    sensorState.relay_state,
-    sensorState.buzzer_state,
-  ).catch((e) => console.error("[MySQL] Gagal simpan SensorKetinggian:", e?.message));
-  simpanDataDebit(sensorState.flow_rate_lpm, sensorState.water_speed_mps)
-    .catch((e) => console.error("[MySQL] Gagal simpan SensorDebit:", e?.message));
-  simpanDataHujan(sensorState.rain_analog, sensorState.rain_pct, sensorState.rain_status)
-    .catch((e) => console.error("[MySQL] Gagal simpan SensorHujan:", e?.message));
+    // ✅ Simpan ke MySQL jika ada payload sensor
+    const dbLevelCtrl = (newLevel === "BAHAYA" ? "SIAGA" : newLevel) as
+      | "AMAN"
+      | "WASPADA"
+      | "SIAGA";
+    console.log(
+      `[/api/control] Menyimpan ke MySQL: tinggi=${sensorState.water_level_cm}, debit=${sensorState.flow_rate_lpm}, hujan=${sensorState.rain_pct}%, cuaca=${sensorState.rain_status}`,
+    );
+    simpanDataTinggi(
+      sensorState.water_level_cm,
+      sensorState.distance_cm,
+      dbLevelCtrl,
+      sensorState.relay_state,
+      sensorState.buzzer_state,
+    ).catch((e) =>
+      console.error("[MySQL] Gagal simpan SensorKetinggian:", e?.message),
+    );
+    simpanDataDebit(
+      sensorState.flow_rate_lpm,
+      sensorState.water_speed_mps,
+    ).catch((e) =>
+      console.error("[MySQL] Gagal simpan SensorDebit:", e?.message),
+    );
+    simpanDataHujan(
+      sensorState.rain_analog,
+      sensorState.rain_pct,
+      sensorState.rain_status,
+    ).catch((e) =>
+      console.error("[MySQL] Gagal simpan SensorHujan:", e?.message),
+    );
+
+    // Catat ke Riwayat Kejadian real-time jika WASPADA / SIAGA
+    recordLiveFloodEvent(newLevel);
+  }
 
   // Trigger state transition alert check (WASPADA / SIAGA)
   checkAndSendAlert(prevLevel, newLevel).catch((err) => {
@@ -811,20 +1096,52 @@ app.post("/api/thresholds", async (req, res) => {
   // ✅ Simpan ke MySQL tabel AmbangBatas
   ubahBatas({
     sensor_mount_height_cm: thresholds.sensor_mount_height_cm,
-    level_aman_max:         thresholds.level_aman_max,
-    level_waspada_max:      thresholds.level_waspada_max,
-    level_siaga_max:        thresholds.level_siaga_max,
-    flow_warning_lpm:       thresholds.flow_warning_lpm,
-    rain_heavy_pct:         thresholds.rain_heavy_pct,
-    auto_relay_enabled:     thresholds.auto_relay_enabled,
-    auto_buzzer_enabled:    thresholds.auto_buzzer_enabled,
-  }).then(() => console.log("✅ [MySQL] AmbangBatas berhasil diperbarui."))
-    .catch((e: any) => console.error("❌ [MySQL] Gagal update AmbangBatas:", e?.message));
+    level_aman_max: thresholds.level_aman_max,
+    level_waspada_max: thresholds.level_waspada_max,
+    level_siaga_max: thresholds.level_siaga_max,
+    flow_warning_lpm: thresholds.flow_warning_lpm,
+    rain_heavy_pct: thresholds.rain_heavy_pct,
+    auto_relay_enabled: thresholds.auto_relay_enabled,
+    auto_buzzer_enabled: thresholds.auto_buzzer_enabled,
+  })
+    .then(() => console.log("✅ [MySQL] AmbangBatas berhasil diperbarui."))
+    .catch((e: any) =>
+      console.error("❌ [MySQL] Gagal update AmbangBatas:", e?.message),
+    );
 
-  // Re-evaluate level with new thresholds
+  // Re-evaluate level & actuators with new thresholds
   const prevLevel = sensorState.warning_level;
-  sensorState.warning_level = computeWarningLevel(sensorState.water_level_cm);
-  checkAndSendAlert(prevLevel, sensorState.warning_level).catch(() => {});
+  const updatedLevel = computeWarningLevel(sensorState.water_level_cm);
+  sensorState.warning_level = updatedLevel;
+  const isAlertLevel =
+    updatedLevel === "WASPADA" ||
+    updatedLevel === "SIAGA" ||
+    updatedLevel === "BAHAYA";
+  sensorState.led_indicator =
+    updatedLevel === "AMAN"
+      ? "green"
+      : updatedLevel === "WASPADA"
+        ? "yellow"
+        : "red";
+  if (prevLevel !== updatedLevel) {
+    manualRelayOverride = null;
+    manualBuzzerOverride = null;
+  }
+  const prevBuzzerBeforeThreshold = sensorState.buzzer_state;
+  if (thresholds.auto_relay_enabled && manualRelayOverride === null) {
+    sensorState.relay_state = isAlertLevel;
+  }
+  if (thresholds.auto_buzzer_enabled && manualBuzzerOverride === null) {
+    sensorState.buzzer_state = isAlertLevel;
+  }
+  if (sensorState.buzzer_state) {
+    if (!prevBuzzerBeforeThreshold || prevLevel !== updatedLevel) {
+      buzzerActiveSinceMs = Date.now();
+    }
+  } else {
+    buzzerActiveSinceMs = null;
+  }
+  checkAndSendAlert(prevLevel, updatedLevel).catch(() => {});
 
   res.json({ status: "success", thresholds });
 });
@@ -858,12 +1175,10 @@ app.post("/api/whatsapp/broadcast", async (req, res) => {
   const targetRecipient = (target || whatsAppConfig.target_number || "").trim();
 
   if (!targetRecipient) {
-    return res
-      .status(400)
-      .json({
-        ok: false,
-        error: "Nomor atau Grup WhatsApp tujuan wajib diisi.",
-      });
+    return res.status(400).json({
+      ok: false,
+      error: "Nomor atau Grup WhatsApp tujuan wajib diisi.",
+    });
   }
 
   const broadcastMsg =
@@ -996,12 +1311,24 @@ app.post("/api/telegram/bot-command", (req, res) => {
 });
 
 // 10. GET /api/history
-app.get("/api/history", (_req, res) => {
+app.get("/api/history", async (_req, res) => {
+  if (isMysqlReady()) {
+    const dbHistory = await ambilRiwayatGrafik(30);
+    if (dbHistory.length > 0) {
+      return res.json({ history: dbHistory });
+    }
+  }
   res.json({ history: historyData });
 });
 
 // 11. GET /api/flood-events & POST /api/flood-events
-app.get("/api/flood-events", (_req, res) => {
+app.get("/api/flood-events", async (_req, res) => {
+  if (isMysqlReady()) {
+    const dbEvents = await ambilRiwayatKejadian(20);
+    if (dbEvents.length > 0) {
+      return res.json({ events: dbEvents });
+    }
+  }
   res.json({ events: floodEvents });
 });
 app.post("/api/flood-events", (req, res) => {
@@ -1031,26 +1358,31 @@ app.get("/api/alarm-logs", async (_req, res) => {
   }
 });
 
-app.patch("/api/alarm-logs/:id", (req, res) => {
+app.patch("/api/alarm-logs/:id", async (req, res) => {
   const { id } = req.params;
   const { duration_seconds } = req.body;
   const log = alarmLogs.find((l) => l.id === id);
   if (log && typeof duration_seconds === "number") {
     log.duration_seconds = duration_seconds;
   }
+  if (typeof duration_seconds === "number") {
+    await updateRiwayatAlarm(id, { durasi_detik: duration_seconds });
+  }
   res.json({ status: "success", log });
 });
 
-app.delete("/api/alarm-logs/:id", (req, res) => {
+app.delete("/api/alarm-logs/:id", async (req, res) => {
   const { id } = req.params;
   alarmLogs = alarmLogs.filter((l) => l.id !== id);
+  await hapusRiwayatAlarm(id);
   res.json({ status: "success" });
 });
 
-app.post("/api/alarm-logs/fix-all-durations", (_req, res) => {
+app.post("/api/alarm-logs/fix-all-durations", async (_req, res) => {
   alarmLogs.forEach((l) => {
     if (l.duration_seconds === 0) l.duration_seconds = 60;
   });
+  await fixAllZeroAlarmDurations();
   res.json({ status: "success" });
 });
 
@@ -1060,7 +1392,7 @@ app.post("/api/admin/login", (req, res) => {
   const queryUser = (username || id || "").trim().toLowerCase();
 
   const user = adminUsers.find(
-    (u) =>
+    (u: AdminUser) =>
       u.username.toLowerCase() === queryUser ||
       u.id.toLowerCase() === queryUser,
   );
@@ -1072,7 +1404,9 @@ app.post("/api/admin/login", (req, res) => {
       password === "admin123")
   ) {
     user.last_login = "Baru saja";
-    updateLoginTerakhir(user.id).catch((e: any) => console.error("[MySQL] Gagal update login_terakhir:", e?.message));
+    updateLoginTerakhir(user.id).catch((e: any) =>
+      console.error("[MySQL] Gagal update login_terakhir:", e?.message),
+    );
     return res.json({
       status: "success",
       success: true,
@@ -1117,7 +1451,7 @@ app.get("/api/admin/users", async (_req, res) => {
     const dbUsers = await ambilSemuaPetugas();
     adminUsers = dbUsers;
     res.json({
-      users: adminUsers.map((u) => ({
+      users: adminUsers.map((u: AdminUser) => ({
         id: u.id,
         name: u.name,
         username: u.username,
@@ -1127,7 +1461,7 @@ app.get("/api/admin/users", async (_req, res) => {
     });
   } catch {
     res.json({
-      users: adminUsers.map((u) => ({
+      users: adminUsers.map((u: AdminUser) => ({
         id: u.id,
         name: u.name,
         username: u.username,
@@ -1143,7 +1477,7 @@ app.post("/api/admin/users", (req, res) => {
   if (!name || !username) {
     return res.status(400).json({ error: "Nama dan username wajib diisi." });
   }
-  const newUser = {
+  const newUser: AdminUser = {
     id: `ADM-0${adminUsers.length + 1}`,
     name,
     username,
@@ -1154,14 +1488,19 @@ app.post("/api/admin/users", (req, res) => {
   adminUsers.push(newUser);
   saveAdminUsers();
   // Sync ke MySQL
-  tambahPetugas(newUser.id, newUser.name, newUser.password)
-    .catch((e: any) => console.error("[MySQL] Gagal simpan Petugas:", e?.message));
+  tambahPetugas(
+    newUser.id,
+    newUser.name,
+    newUser.password || "password123",
+  ).catch((e: any) =>
+    console.error("[MySQL] Gagal simpan Petugas:", e?.message),
+  );
   res.json({ status: "success", user: newUser });
 });
 
 app.put("/api/admin/users/:id", (req, res) => {
   const { id } = req.params;
-  const user = adminUsers.find((u) => u.id === id);
+  const user = adminUsers.find((u: AdminUser) => u.id === id);
   if (!user) return res.status(404).json({ error: "User tidak ditemukan" });
 
   if (req.body.name) user.name = req.body.name;
@@ -1173,7 +1512,9 @@ app.put("/api/admin/users/:id", (req, res) => {
   updatePetugas(id, {
     name: req.body.name,
     password: req.body.password,
-  }).catch((e: any) => console.error("[MySQL] Gagal update Petugas:", e?.message));
+  }).catch((e: any) =>
+    console.error("[MySQL] Gagal update Petugas:", e?.message),
+  );
 
   res.json({ status: "success", user });
 });
@@ -1185,10 +1526,12 @@ app.delete("/api/admin/users/:id", (req, res) => {
       .status(400)
       .json({ error: "Tidak dapat menghapus admin terakhir." });
   }
-  adminUsers = adminUsers.filter((u) => u.id !== id);
+  adminUsers = adminUsers.filter((u: AdminUser) => u.id !== id);
   saveAdminUsers();
   // Sync ke MySQL
-  hapusPetugas(id).catch((e: any) => console.error("[MySQL] Gagal hapus Petugas:", e?.message));
+  hapusPetugas(id).catch((e: any) =>
+    console.error("[MySQL] Gagal hapus Petugas:", e?.message),
+  );
   res.json({ status: "success" });
 });
 
@@ -1197,10 +1540,26 @@ app.delete("/api/admin/users/:id", (req, res) => {
 // =====================================================================
 app.get("/api/debug/db-test", async (_req, res) => {
   const connected = isMysqlReady();
-  const results: Record<string, any> = { mysql_connected: connected };
+  const dbError = getMysqlError();
+  const results: Record<string, any> = {
+    mysql_connected: connected,
+    db_config: {
+      host: process.env.DB_HOST || "localhost",
+      port: Number(process.env.DB_PORT || 3306),
+      user: process.env.DB_USER || "root",
+      database: process.env.DB_NAME || "ews_banjir",
+      password_set: Boolean(process.env.DB_PASSWORD),
+    },
+  };
 
   if (!connected) {
-    return res.json({ ...results, error: "MySQL tidak terhubung. Pastikan Laragon aktif dan server sudah direstart." });
+    return res.json({
+      ...results,
+      error:
+        dbError ||
+        "MySQL tidak terhubung. Pastikan Laragon aktif dan server sudah direstart.",
+      hint: "Buka file .env dan pastikan kredensial database sudah benar. Jika di komputer lokal, pastikan Laragon MySQL sudah START.",
+    });
   }
 
   // Test insert SensorHujan
@@ -1242,11 +1601,13 @@ async function startServer() {
     if (dbUsers.length > 0) {
       adminUsers = dbUsers;
       saveAdminUsers();
-      console.log(`[AdminUsers] Synced ${dbUsers.length} user(s) dari MySQL ke JSON`);
+      console.log(
+        `[AdminUsers] Synced ${dbUsers.length} user(s) dari MySQL ke JSON`,
+      );
     } else {
       // Jika tabel Petugas kosong, seed dari adminUsers yang ada
       for (const u of adminUsers) {
-        await tambahPetugas(u.id, u.name, u.password);
+        await tambahPetugas(u.id, u.name, u.password || "password123");
       }
       console.log("[AdminUsers] Seed adminUsers ke MySQL selesai");
     }

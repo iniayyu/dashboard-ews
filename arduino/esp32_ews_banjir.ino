@@ -5,13 +5,13 @@
 // =====================================================================
 // 1. PENGATURAN WI-FI & URL SERVER LOKAL
 // =====================================================================
-const char* WIFI_SSID     = "LabRiset";   // <-- Ganti dengan Hotspot HP Anda
-const char* WIFI_PASSWORD = "L4bR1set";  // <-- Sandi Hotspot HP Anda
+const char* WIFI_SSID     = "ayyu";   // <-- Ganti dengan Hotspot HP Anda
+const char* WIFI_PASSWORD = "haloayyu";  // <-- Sandi Hotspot HP Anda
 
 // ✅ PERBAIKAN: Tambahkan port 3000 & hapus spasi setelah "http://"
 // Ganti 10.209.189.95 dengan IPv4 Address laptop Anda (cek lewat ipconfig di CMD)
-const char* SERVER_URL    = "http://10.209.189.95:3000/api/sensor/telemetry";
-const char* STATUS_URL    = "http://10.209.189.95:3000/api/status";
+const char* SERVER_URL    = "http://10.245.142.251:3000/api/sensor/telemetry";
+const char* STATUS_URL    = "http://10.245.142.251:3000/api/status";
 const char* DEVICE_ID     = "ESP32-EWS-CILANGKAP-01";
 
 // =====================================================================
